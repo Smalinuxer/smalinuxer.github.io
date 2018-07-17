@@ -64,7 +64,7 @@ keywords: android,art,dalvik
 
 该算法如图(图片来自《深入理解jvm》):
 
-![img](http://7xkw0v.com1.z0.glb.clouddn.com/f14c0b08f7b831fd5088fd0cfe0c802d_b.png)
+![1](http://smali.test.upcdn.net/dvm-art-diff-img-1.png)
 
 可以看出每次gc后内存千疮百孔,本来连续分配的内存块变得碎片化严重,之后再分配进入的对象再进行内存寻址变得困难
 
