@@ -1,9 +1,9 @@
----
-layout: post
-title: android 4.0.3源码编译小结
-category: android
-keywords: android,aosp,source,编译
----
+# ---
+# layout: post
+# title: android 4.0.3源码编译小结
+# category: android
+# keywords: android,aosp,source,编译
+# ---
 
 ## 0x01. 前言
 android6.0发布了,删除了n年之前编译的2.3.5_r1的镜像,打算编译4.0.3_r1
