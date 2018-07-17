@@ -233,9 +233,3 @@ keywords: android,smali,语法
 出现相关的log,则说明插桩成功了
 
 
-
-如下图
-
-![1](http://7xkw0v.com1.z0.glb.clouddn.com/%E5%B1%8F%E5%B9%95%E5%BF%AB%E7%85%A7%202016-02-29%20%E4%B8%8B%E5%8D%8812.18.17.png)
-
-
