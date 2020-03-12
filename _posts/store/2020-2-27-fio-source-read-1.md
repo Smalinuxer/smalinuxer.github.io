@@ -67,5 +67,21 @@ fio --server=sock:/tmp/fio.sock
 
 ## 2 fio_backend的启动
 
- 
+```$c
+int fio_backend(struct sk_out *sk_out)
+{
+	...
 
+	startup_sem = fio_sem_init(FIO_SEM_LOCKED);
+
+	// 这是一个伏笔
+	stat_init();
+
+	helper_thread_create(startup_sem, sk_out);
+
+
+}
+
+```
+
+未完待续，最近很忙
