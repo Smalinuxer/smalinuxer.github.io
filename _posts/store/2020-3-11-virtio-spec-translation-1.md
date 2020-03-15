@@ -5,18 +5,6 @@ category: store
 keywords: store,virtio,virtualization
 ---
 
-## 0. 写在前面的话
-
-virtio这个东西，本人其实并不是非常熟悉，项目需要，开始学习spec。翻译可能并不尽善尽美，也会加入我自己的一些理解。希望您能多多体谅。
-
-如果有翻译出错的地方可以联系我的邮箱。如果您有更多更好的建议，也可以联系本人。或有任何问题，您可以联系我的私人邮箱 [smalinuxer@gmail.com](mailto://smalinuxer@gmail.com)
-
-翻译内容中，带有mark字段的为翻译者所著，表示自身不理解的地方
-
-原文档地址为：[virtio-v1.1.pdf](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.pdf)
- 
-版权归属于OASIS所有，翻译版本只为学习交流，请勿商务用途，翻译版本版权归属于[jiaqizho.github.com](http://jiaqizho.github.com)
-
 
 ## 1. 前言
 该文档描述了能使用“virtio”的设备家族的技术规范，这些设备将在虚拟环境中可视化。通过这种设计，对于虚拟机看来，这些虚拟设备就像是物理设备一样。 并且在本文档中也将虚拟设备视为物理设备。这将允许虚拟机（guest os)使用标准的驱动程序(driver)和驱动扫描程序(driver discovery)。
@@ -92,7 +80,7 @@ CPU_TO_BE16(B << 15 | A)
 - 当状态不是DRIVER_OK时候，设备一定不要消费或发送任何bufeer notification去驱动
 - 当设备发生了错误，并且需要重置的时候，设备最好设置为DEVICE_NEEDS_RESET。如果当前设备时DRIVER_OK状态的，那么它在被设置为DEVICE_NEEDS_RESET时候，该设备一定要发送一个configuration change notification通知(2.3中专用通知)给驱动。
 
-### 2.2 功能位
+### 2.2 功能位(Feature Bits)
 每一个virtio设备提供了它的所有的功能。在当设备初始化的时候，驱动读到它的功能位，并且告诉设备的子集（mark:原文tells the device the subset）它接受了，如果想重新获取的话那只能重置了。
 
 这样将提供向前和向后的兼容性：如果设备有了一个新的功能，那么旧的驱动不会将该功能位写回设备。同样，如果驱动有一个新特性但是设备不支持，这个功能也是不会对外提供的。功能位字节分布如下：
@@ -111,7 +99,7 @@ CPU_TO_BE16(B << 15 | A)
 
 
 
-### 2.3 通知
+### 2.3 通知(Notifications)
 “发送通知”（驱动到设备，设备到驱动）的概念是非常重要的。通知（Notifications）是一种特殊的通信手段。
 以下有三种通知属性：
 - configuration change notification 配置更改通知
@@ -125,7 +113,7 @@ CPU_TO_BE16(B << 15 | A)
 在以下各章中详细说明了不同通知的语义，特定于传输的实现以及其他重要方面。
 大多数传输会使用中断来实现设备发送给驱动程序的通知。因此，在文档的先前版本中，这些通知通常称为中断。在本文档中，仍保留该中断术语。有时，“中断”用于指代通知或收到通知。
 
-### 2.4 设备配置空间
+### 2.4 设备配置空间(Device Configuration Space)
 
 设备配置空间通常用于rarely-changing或initialization-time参数。配置字段是可选的，功能位会标识配置空间存在与否：该文档的未来版本可能会在尾部添加额外的字段来扩展设备配置空间。
 
@@ -187,7 +175,319 @@ virtqueue由三个部分组成：
 
 任何驱动和设备支持Split Virtqueues和Packed Virtqueues的其中一种或者两种。
 
-## 2.6 分割类型Virtqueues
+## 2.6 Split Virtqueues
 
-未完待续
+Split virtqueue 格式只在标准1.0之后支持
 
+Split virtqueue格式将virtqueue分割了好多部分，每一个部分对于设备和驱动来说都是可写的， 但是只有一个能写。当缓冲区改变的时候（available or used buffer notification）在Split virtqueue里面的多个parts且或在parts中的locations都得更新。
+
+每一个队列有16位大小的队列参数，这个参数设置了条目数且表示了队列总大小。
+
+每一个队列由三个部分组成：
+
+- Descriptor Table(描述表) : 描述符的区域
+- Available Ring(可用环形区) : 驱动区域
+- Used Ring (已用的环形区) ：设备区域
+
+每一个部分都是物理连续的在虚拟机内存，并且有不同的对齐要求。
+
+virtqueue内存对齐和大小要求如下：
+
+| Virtqueue Part  |	Alignment   |	Size               |
+| --------        |  :-----:    |   :----:             |
+| Descriptor Table| 	16 		|	16 ∗ (Queue Size)  | 
+| Available Ring  |	    2 		|	6 + 2∗(Queue Size) |
+| Used Ring       |	    4 		|	6 + 8∗(Queue Size) |
+
+表描述：
+- Alignment列给出virtqueue的每个部分的最小对齐方式。
+- Size列给出virtqueue每个部分的总字节数。
+- Queue Size对应于virtquee中的最大缓冲区数。Queue Size的值总是2的幂，最大Queue Size值为32768。此值是以bus-spec的方式指定的。
+
+当驱动想要发送一个buffer到设备，它将填充描述表(或多个表连在一起)，并且将描述索引(Descriptor index)放入可用环形区。之后驱动会通知设备。当设备完成了buffer的处理，设备会将描述索引写到已用的环形区。并且发送出一个used buffer notification。
+
+
+### 2.6.1 驱动要求：Virtqueues
+
+驱动必须保证每一个virtqueue第一个字节的物理地址是上表指定对齐值的倍数。
+
+### 2.6.2 遗留接口：virtqueues的内存结构
+
+对于遗留的接口，对virtqueues的内存结构有了一些限制。
+
+略，老的virtuqueues内存分布
+
+### 2.6.3 遗留接口：virtqueues的Endianness
+
+略
+
+### 2.6.4 消息框架
+
+带有描述符的消息框架是和buffer内容无关的。举个例子，一个网络传输的buffer由12个字节的头通过网络包组成，这将可以简单地放在描述符表中，作为12 + 1514字节的输出描述符。但是同样的，它也可以头和包内容相邻，组成一个1526大小的输出描述符。或也可以由三个或者更多描述符组成（可能会性能降低）。
+
+对于描述符长度，有些设备的实现附带了很多且有来由的限制（比如虚拟机设置的IOV_MAX）。这点是没啥问题的：对于那些创建不合理大小的描述符的驱动程序，比如将一个网络数据包分成1500个单字节的描述符，我们不会给予多少同情！（翻译者:你吼那么大声干什么啦？）
+
+### 2.6.4.1 驱动要求：消息框架
+
+设备不得对描述符的特定排列做出假设。The device MAY have a reasonable limit of descriptors it will allow in a chain.
+
+### 2.6.4.2 驱动要求：消息框架
+
+驱动必须要防止任意设备可写描述符(device-writable descriptor)元素在设备可读描述符(device-readable descriptor)元素之后。
+
+驱动不应该用太多的描述符来描述buffer。（翻译者注：上文说性能会下降）
+
+### 2.6.4.3 遗留接口：消息框架
+
+略
+
+### 2.6.5 Virtqueue的描述表
+
+描述表记录了设备已用的buffer。addr是物理地址，并且buffer是可以用next串联到下一个的，描述符描述的buffer只能是只读或者只写的。但是串联起来的描述符可以同时包含可读或可写buffer。
+
+提供给设备的内存的实际内容取决于设备类型。 最常见的方法是在数据的开头加上一个头（包含一些小端数据）以便设备读取。并在数据尾部加入一个状态字段以便设备写入。
+
+```
+struct virtq_desc {
+	/* Address (guest-physical). */
+	le64 addr;
+	/* Length. */
+	le32 len;
+	/* This marks a buffer as continuing via the next field. */
+	#define VIRTQ_DESC_F_NEXT 1
+	/* This marks a buffer as device write-only (otherwise device read-only). */
+	#define VIRTQ_DESC_F_WRITE 2
+	/* This means the buffer contains a list of buffer descriptors. */
+	#define VIRTQ_DESC_F_INDIRECT 4
+	/* The flags as indicated above. */
+	le16 flags;
+	/* Next field if flags & NEXT */
+	le16 next;
+};
+```
+
+由virtqueue的队列长度来定义描述表的大小：描述表容量的最大值为virtqueue的大小
+
+如果用了VIRTIO_F_IN_ORDER这个功能位，驱动使用描述符(mark:不是在描述表吗，为什么又是in ring,wrng)的顺序：从下标0到表的末尾。
+
+
+### 2.6.5.1 设备要求：virtqueue的描述表
+
+设备不能写只读，设备不应该去读只写去（可能是debug会这么做）。
+
+### 2.6.5.2 驱动要求：virtqueue的描述表
+
+设备的描述符链总长一定不能长过2^32字节。这意味着描述符链循环是被禁止的!
+
+如果用了VIRTIO_F_IN_ORDER功能位，然后下标为x的描述符中有VRING_DESC_F_NEXT标，当x = queue_size - 1的时候，驱动必须在next中设置0，并且x + 1为其他的描述符。
+
+### 2.6.5.3 间接描述符
+
+有些设备通过并发分发大量的大请求获得收益。VIRTIO_F_INDIRECT_DESC功能位允许这一点（可以参考virtio_queue.h），为了增加环的容量，驱动可以存一个内存中的间接描述符表(table
+of indirect descriptors)，并插入一个描述符在主virtqueue(flags&VIRTQ_DESC_F_INDIRECT要为true)，这样内存就可以包含非直接描述表。addr和lenrefer对应间接描述符表中的地址和长度。
+
+间接描述符表内存分布如下(len为指向的描述符的长度，是一个变量，所以这个并不能编译）：
+
+```
+struct indirect_descriptor_table {
+	/* The actual descriptors (16 bytes each) */
+	struct virtq_desc desc[len / 16];
+};
+```
+
+第一个间接描述符在间接描述表的第一个（index 0 ），其他的间接描述符用next属性相连，间接描述符在尾部的话，它是没有有效的next(flags&VIRTQ_DESC_F_NEXT为false)信号。单个间接描述表可以包括可读、可写两种描述符。
+
+如果有VIRTIO_F_IN_ORDER功能位，间接描述符是顺序索引：index 0后面是index 1、index 2.... 。
+
+### 2.6.5.3.1 驱动要求：间接描述表
+
+- 在VIRTIO_F_INDIRECT_DESC功能位未被设置时，驱动必须不不设置VIRTQ_DESC_F_INDIRECT功能位。驱动不能在间接描述符中设置VIRTQ_DESC_F_INDIRECT功能位（即 每个描述符只有一个表）。
+- 驱动创建的描述符链不能超过设备的队列大小。
+- 驱动不能同时设置VIRTQ_DESC_F_INDIRECT和VIRTQ_DESC_F_NEXT功能位。
+- 如果设置了VIRTIO_F_IN_ORDER功能位，间接描述符必须是顺序的。
+
+### 2.6.5.3.2 设备要求：间接描述表
+
+- 设备必须忽略在间接描述符中的只读标识(flags&VIRTQ_DESC_F_WRITE)
+- 设备必须处理零个或多个正常且带有flag&VIRTQ_DESC_F_INDIRECT描述符。
+
+### 2.6.6 Virtqueue可用环形区
+
+可用环形区结构：
+```
+struct virtq_avail {
+	#define VIRTQ_AVAIL_F_NO_INTERRUPT 1
+	le16 flags;
+	le16 idx;
+	le16 ring[ /* Queue Size */ ];
+	le16 used_event; /* Only if VIRTIO_F_EVENT_IDX */
+};
+```
+
+驱动使用可用环形区为设备提供缓冲区：每个环形区中的元素都指向描述符链的头部。它只由驱动写入，由设备读取。
+
+idx字段表示驱动将下一个描述符项放入环中的位置（将队列大小moudulo化）。从0开始，然后增加。
+
+### 2.6.6.1 驱动要求：Virtqueue可用环形区
+
+驱动一定不能减少idx在virtqueue中（即不能“unexpose”buffer）
+
+### 2.6.7 禁用已用buffer通知
+
+如果未设置VIRTIO_F_EVENT_IDX功能位，可用环形区中的flags字段为驱动提供了一种粗略的机制在驱动想要给到设备信息的时候，他不会被通知当buffer被使用。
+
+否则的话,used_event是一种性能更高的替代方法，其中驱动将指定设备在被通知之前可以运行多久。
+
+这两种通知的方法都不可靠，因为它们与设备并不同步，但它们都是有用的优化。
+
+### 2.6.7.1 驱动要求：禁用已用buffer通知
+
+如果未设置VIRTIO_F_EVENT_IDX：（翻译注：原文是is not negotiated ，这块翻译不准确）
+- 驱动需要设置flag为0或1.
+- 驱动可能设置flag为1，通知设备不需要通知。
+
+否则，已设置VIRTIO_F_EVENT_IDX：
+- 驱动flag必须设置为0
+- 驱动可能使用used_event告诉设备不需要获取通知，直到设备将used_event指定的索引项写入已用环形区（等效地，直到所用环中的idx达到used_event的值+1）
+
+设备必须处理驱动给出的spurious的通知
+
+### 2.6.7.2 设备要求:禁用已用buffer通知
+
+如果未设置VIRTIO_F_EVENT_IDX：（翻译注：感觉写反）
+- 设备必须忽略used_event
+- 再设备写入一个描述符索引到已用环形区中后：
+	- 如果flag设置为1，设备不应该发送通知
+	- 如果flag设置为0，设备必须发送通知
+
+否则，已协商VIRTIO_F_EVENT_IDX：
+- 设备必须忽略flags的低位
+- 再设备写入一个描述符索引到已用环形区中后：
+	- 如果idx属性在已用环形区（索引决定了描述符的位置）被放入了used_event。这个设备必须发送通知
+	- 否则设备不需要发送通知
+
+例子：如果used_event是0，那么设备使用VIRTIO_F_EVENT_IDX将发送一个used buffer notification到驱动在第一个buffer被使用了（一直循环到第65536个buffer）。
+
+### 2.6.8 Virtqueue已用环形区
+
+已用环形区内存结构：
+```
+struct virtq_used {
+	#define VIRTQ_USED_F_NO_NOTIFY 1
+	le16 flags;
+	le16 idx;
+	struct virtq_used_elem ring[ /* Queue Size */];
+		le16 avail_event; /* Only if VIRTIO_F_EVENT_IDX */
+	};
+	/* le32 is used here for ids for padding reasons. */
+	struct virtq_used_elem {
+	/* Index of start of used descriptor chain. */
+	le32 id;
+	/* Total length of the descriptor chain which was used (written to) */
+	le32 len;
+};
+```
+已用环形区是设备在使用完buffer后返回buffer的地方：它只由设备写入，由驱动程序读取。
+
+每一个元素在环形区都是一对：id表示描述符链的头部元素（这与之前虚拟机放置在可用环形区中的条目相匹配）。 并且len代表了写入buffer所有字节数。
+
+注：len 对于使用不受信任的缓冲区的驱动特别有用：如果驱动不知道设备到底写了多少，驱动必须事先将缓冲区归零，以确保不会发生数据泄漏。 举个例子，一个网络驱动可能处理接收的buffer到未授权的用户空间应用中，如果网络设备不去覆盖的写那块buffer，这可能会将已释放内存的内容泄漏到别的应用程序。
+
+idx字段代表了设备将在环形区中放置下一个描述符的位置（modulo队列大小）。开始是0，之后增加。
+
+### 2.6.8.1 遗留接口：Virtqueue已用环形区
+
+略
+
+### 2.6.8.2 设备要求：Virtqueue已用环形区
+
+设备必须再更新已用idx之前设置len。
+
+设备必须写入len字节数到描述符，在更新使用的idx之前，从第一个设备可写缓冲区开始。
+
+设备可能会写入大于len的字节数到描述符
+
+注：在某些潜在的错误情况下，设备可能不知道缓冲区的哪些部分被写入了。这就是为什么len被允许低估的原因：这比驱动认为未初始化的内存在没有被重写时被重写要好。
+
+### 2.6.8.3 驱动要求：Virtqueue已用环形区
+
+驱动必须不能假设设备可写缓冲区中的数据超过第一个len字节，并且应该忽略这些数据。
+
+### 2.6.9 顺序使用描述符
+
+有些设备总是按照它们可用的顺序使用描述符。这些设备可以提供VIRTIO_F_IN_ORDER功能位。如果设置了这个功能位，它会允许设备仅通过写入一个已用环形区条目（id最后一个缓冲区的描述符链的头条目相对应）来通知驱动使用这一个缓冲区。
+
+然后，设备根据批次的大小在环中向前跳跃。因此，它会增加按批次大小使用idx。
+
+驱动需要查找使用的id并计算批次处理的大小，以便能够前进到设备将写入下一个已用环形区的位置。
+
+这样可用环形的偏移和已用环形区相匹配，下一个也是同样匹配的。
+
+被跳过的缓冲区(没有使用过得已用环形区)会被假设为已经被设备使用过了(读或写)。
+
+### 2.6.10 禁用可用Buffer通知
+
+设备可以不接收available buffer notification，其方式类似于驱动不接收used buffer notification一样，再2.6.7所述。
+
+### 2.6.10.1 驱动要求：禁用可用Buffer通知
+
+当开始分配内存给已用环形区时，驱动必须初始化标志位为0再已用环形区中。
+
+如果未设置VIRTIO_F_EVENT_IDX：
+- 驱动必须忽略avail_event值
+- 在驱动写入设备描述符index到可用环形区后：
+	- 如果flag是1，驱动不应该发送通知
+	- 如果flag是0，启动应该发送通知。
+
+否则，如果设置了VIRTIO_F_EVENT_IDX：
+- 驱动必须忽略flags低位。
+- 在驱动写入设备描述符index到可用环形区后：
+	- 如果idx属性在可用环形区（索引决定了描述符的位置）被放入了avail_event。这个驱动必须发送通知
+	- 否则驱动不应该发送通知。
+
+### 2.6.10.1 设备要求：禁用可用Buffer通知
+
+如果未设置VIRTIO_F_EVENT_IDX：
+- 设备需要设置flag为0或1.
+- 设备可能设置flag为1，通知设备不需要通知。
+
+否则，已设置VIRTIO_F_EVENT_IDX：
+- 设备flag必须设置为0
+- 设备可能使用avail_event告诉驱动不需要获取通知，直到驱动将avail_event指定的索引项写入可用环形区（等效地，直到所用环中的idx达到avail_event的值+1）
+
+设备必须处理驱动给出的spurious的通知
+
+### 2.6.11 Virtqueues操作助手
+
+Linux kernal源码已更可用的形式包含上述定义，内容在include/uapi/linux/virtio_ring.h中。这是IBM和Red Hat根据（3-clause）BSD许可证显式授权的，以便它可以被所有其他项目自由使用。并且也在virtio_queue.h有定义。
+
+### 2.6.12 Virtqueue操作
+
+virtqueue操作有两个部分：
+- 向设备提供新的可用缓冲区
+- 处理设备中的已用缓冲区
+
+注：举个例子，最简单的virtio网络设备有两个virtqueue：传输virtqueue（the transmit virtqueue）和接收virtqueue（the receive virtqueue）。驱动将向外(设备可读)网络包放到传输virtqueue,并且释放他们当他们被用掉了。最简单的，向内网络(设备可写)缓存将被放到接收virtqueue，并且处理它们，当他们被用掉。
+
+下面是在更详细地使用split virtqueue格式时，对于这两个操作部分的需求。
+
+### 2.6.13 提供buffer到设备
+
+驱动提供buffer到一个设备的virtqueues步骤如下：
+1. 驱动将buffer放入描述符表中的空闲描述符中（请参阅2.6.5 Virtqueue描述符表）。
+2. 驱动将描述符链头部的索引插入可用环形区的下一个环条目中。
+3. 步骤1，2可能重复多次，如果是批次数据的话。
+4. 驱动分配内存(performs a suitable memory barrier)，以确保设备在下一步之前看到更新的描述符表和可用的环。
+5. 可用的idx自增，依据于添加到可用环形区的描述符链头的数量。
+6. 驱动分配内存，以确保它在检查禁用通知操作之前更新idx字段。
+7. 驱动发送available buffer notification到设备，如果需要的话(翻译注：看之前设置过了的话)。
+
+注意，上面的代码没有对可用的环缓冲区wrapping around采取预防措施：这是不可能的，因为环形区区的大小与描述符表的大小相同，所以步骤（1）将防止出现这种情况。
+
+此外，最大队列大小为32768（16位最大值），因此16位idx值始终可以区分满缓冲区和空缓冲区。
+
+以下是每个阶段的详细要求。
+
+### 2.6.13.1 buffer放入描述表
+
+未完待
