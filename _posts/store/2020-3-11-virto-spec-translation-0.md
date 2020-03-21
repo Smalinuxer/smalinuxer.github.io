@@ -32,7 +32,7 @@ virtio这个东西，本人其实并不是非常熟悉，项目需要，开始�
     - [x] 2.3 通知(Notifications)
     - [x] 2.4 设备配置空间(Device Configuration Space)
     - [x] 2.5 Virtqueues
-    - [ ] 2.6 Split Virtqueues
+    - [x] 2.6 Split Virtqueues
     - [ ] 2.7 Packed Virtqueues
 - [ ] 第三章：General Initialization And Device Operation
     - [ ] 3.1 Device Initialization

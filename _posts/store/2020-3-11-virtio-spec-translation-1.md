@@ -490,4 +490,232 @@ virtqueue操作有两个部分：
 
 ### 2.6.13.1 buffer放入描述表
 
-未完待
+一个buffer由1到多个设备可写且物理连续的元素组成(最少一个)，且其后面跟着1到多个设备可读且物理连续的元素(最少一个)。这个算法将映射它到描述表，来形成描述链。
+
+对于每一个buffer元素，简称b:
+
+1. 获得下一个空闲的描述表实体，简称d
+2. 设置d.addr为b的物理地址开头
+3. 设置d.len为b的长度
+4. 如果b是设备可写的，设置d.flags为VIRTQ_DESC_F_WRITE，否则为0
+5. 如果在b后面插入了元素
+	1. 设置d.next为新插入元素
+	2. 设置VIRTQ_DESC_F_NEXT到d.flags里面去
+
+在实践中，d.next通常被用于连接空闲的描述符，并在开始映射之前单独计数以检查是否有足够的空闲描述符。
+
+### 2.6.13.2 更新可用环形区
+
+描述链的head是上面算法的第一个d，即描述表的下标映射到buffer的第一部分(翻译注：意思就是head是上面描述链的头)，缺乏经验的驱动实现可能会这样写：
+```
+avail->ring[avail->idx % qsz] = head;
+```
+
+然而，通常驱动可能会添加多个描述链在它更新idx(在指针对于设备可见)之前。所以它通常会保存一个计数器来记录驱动这会添加了多少描述链：
+```
+avail->ring[(avail->idx + added++) % qsz] = head;
+```
+
+### 2.6.13.3 更新idx
+
+idx经常增加，并且小于65536：
+```
+avail->idx += added;
+```
+
+一旦驱动更新了可用的idx，就会公开描述符及其内容。设备可以立即访问驱动创建的描述符链和它们引用的内存。
+
+### 2.6.13.3.1 驱动要求：更新idx
+
+驱动必须在idx更新之前分配好相应的内存，以确保设备看到最新的副本。
+
+### 2.6.13.4 通知设备
+
+设备通知方法是总线限定的(bus-specific)，但是通常这种方法代价很高，因此，如2.6.10节所述，如果设备不需要这些通知，它可能会禁止这些通知。
+
+### 2.6.13.4.1 驱动要求：通知设备
+
+驱动必须在读flags或读avail_event之前分配好相应的内存，以避免丢失通知。
+
+### 2.6.14 从设备接收可用buffer
+
+一旦设备使用了描述符所指的缓冲区（根据virtqueue和设备的功能，读取或写入或读写）。它就会向驱动发送一个used buffer notification ，如第2.6.7节所述。
+
+注：为了获得最佳性能，驱动可能会在处理已用的环形区时禁用used buffer notification，但请注意在清空环形区和重新启用通知时缺少通知的问题。这通常是通过在重新启用通知后重新检查已用缓冲区来处理的。
+
+```
+virtq_disable_used_buffer_notifications(vq);
+for (;;) {
+	if (vq->last_seen_used != le16_to_cpu(virtq->used.idx)) {
+		virtq_enable_used_buffer_notifications(vq);
+		mb();
+		if (vq->last_seen_used != le16_to_cpu(virtq->used.idx))
+			break;
+		virtq_disable_used_buffer_notifications(vq);
+	}
+	struct virtq_used_elem *e = virtq.used->ring[vq->last_seen_used%vsz];
+	process_buffer(e);
+	vq->last_seen_used++;
+}
+```
+
+### 2.7 packed virtqueues
+
+Packed virtqueues是另一种可读写且压缩的virtqueue布局。即由host和虚机读写的内存。
+
+VIRTIO_F_RING_PACKED功能位开启，Packed virtqueues才能使用。
+
+每一个Packed virtqueues支持2^15实体。
+
+对于当前传输，virtqueues位于由驱动分配的虚机内存中。每个Packed virtqueue由三部分组成：
+
+- 描述环(Descriptor Ring) : 描述符的区域
+- 驱动事件抑制器(Driver Event Suppression) : 驱动区域
+- 设备事件抑制器(Device Event Suppression) : 设备区域
+
+其中描述符环依次由描述符组成，并且每个描述符可以包含以下部分：
+
+- buffer的id(Buffer ID)
+- 元素地址(Element Address)
+- 元素长度(Element Length)
+- 标识位(Flags)
+
+（翻译注：和split virtioqueues区别貌似在于一个两个队列，一个是环形）
+
+一个buffer由0到多个设备可写且物理连续的元素组成(最少一个)，且其后面跟着0到多个设备可读且物理连续的元素(最少一个)。
+
+当驱动想要向设备发送这样的缓冲区时，它会将至少一个描述缓冲区元素的可用描述符写入描述符环中。描述符通过存储在描述符中的buffer ID与buffer区相关联。
+
+然后驱动程序通知设备，当设备处理完缓冲区后，它将一个已用设备描述符（包括缓冲区ID）写入描述符环（覆盖以前可用的驱动描述符），并发送一个used event notifion。
+
+描述符环是循环使用的：驱动按顺序将描述符写入环中。之后到达环的末端，下一个描述符被放置在环的头部。一旦描述环中满了，驱动将停止发送新的请求。并等待设备开始处理描述符，并在产生新的驱动描述符之前写出(write out)一些已用描述符。
+
+类似地，设备按顺序从环中读取描述符，并检测驱动提供的描述符是否可用。当描述符的处理完成时，设备会将已用描述符写回环中。
+
+注：在读取驱动描述符并顺序启动它们之后，设备可能按顺序来处理它们，已用设备描述符按其处理完成的顺序写入（翻译注：应该是按顺序写入描述环）。
+
+设备事件抑制器(Device Event Suppression)数据结构是设备只写的。它包括用于减少设备事件数量的信息，即，向设备发送较少的available buffer notifications。
+
+驱动事件抑制器(Driver Event Suppression)数据结构是驱动只读的。它包括用于减少驱动事件数量的信息，即，向驱动发送较少的used buffer notifications。
+
+### 2.7.1 驱动和设备warp计数器
+
+每个驱动和设备都需要在内部维护一个初始化为1的warp计数器。
+
+由驱动维护的计数器称为Driver Ring Wrap Counter，驱动每次使环中的最后一个描述符变为可用时都会更改此计数器的值（在最后一个描述符变为可用之后才会去改该值）。
+
+由设备维护的计数器称为Divice Ring Wrap Counter，设备每次使环中的最后一个描述符变为已用时都会更改此计数器的值（在最后一个描述符变为已用之后才会去改该值）。
+
+很容易看出，在驱动中的Driver Ring Wrap Counter与设备中的Divice Ring Wrap Counter处理相同的描述符，或者当使用了所有可用的描述符时匹配。
+
+要将描述符标记为可用和已用，驱动和设备都使用以下两个标志：
+
+```
+#define VIRTQ_DESC_F_AVAIL (1 << 7)
+#define VIRTQ_DESC_F_USED (1 << 15)
+```
+
+为了标记一个描述符是可用的，驱动设置VIRTQ_DESC_F_AVAIL在flag中来匹配Driver Ring Wrap Counter。它也设置VIRTQ_DESC_F_USED来匹配内部值（即不匹配内部的 Driver Ring Wrap Counter）
+
+为了标记一个描述符是已用的，设备设置VIRTQ_DESC_F_USED在flag中来匹配Divice Ring Wrap Counter。它也设置VIRTQ_DESC_F_AVAIL来匹配内部值（即不匹配内部的 Divice Ring Wrap Counter）
+
+所以对于可用描述符和已用描述符来说，VIRTQ_DESC_F_AVAIL and VIRTQ_DESC_F_USED是不同的。
+
+注：this observation is mostly useful for sanity-checking as these，且是必要不充分条件。 举个例子：所有描述符都是赋0初始化的，为了检测已用和可用描述符，驱动和设备可以跟踪最后观察到的VIRTQ_DESC_F_USED/VIRTQ_DESC_F_AVAIL。用代码来检查VIRTQ_DESC_F_AVAIL/VIRTQ_DESC_F_USED设置位变化也是可能的。
+
+### 2.7.2 轮询可用和已用描述符
+
+设备和驱动描述符的写入通常可以重新排序。但是每一方（驱动和设备）只需要轮询（或测试）内存中的一个位置：下一个设备描述符，在他们之前处理的设备描述符之后，按循环的顺序。
+
+有时，设备只需要在处理一批多个可用描述符后写出一个已用的描述符。如下面更详细描述的，当使用描述符链或按顺序使用描述符时，可能会发生这种情况。在这种情况下，设备写出已使用的描述符，其buffer id为组中最后一个描述符。在处理已用描述符之后，设备和驱动随后在环中向前跳过组中剩余描述符的数量（翻译注：应该是按批处理的话，跳过批次的数量），直到处理（读取驱动和写入设备）下一个使用的描述符。
+
+
+### 2.7.3 写标志位（Write Flags）
+
+在可用描述符中，在Flags中的VIRTQ_DESC_F_WRITE标识用于将描述符标记为对应于缓冲区的只读或写元素。
+
+```
+/* This marks a descriptor as device write-only (otherwise device read-only). */
+#define VIRTQ_DESC_F_WRITE 2
+```
+
+在已用描述符中，此位用于指定设备是否已将数据写入缓冲区的部分。
+
+### 2.7.4 元素地址和长度（Element Address and Length）
+
+在可用描述符中，Element Address对应于缓冲区元素的物理地址。Length 假定是物理连续的，它存了元素的长度。
+
+在已用描述符中，Element Address是用不到的，Element Length指定了被设备初始化的buffer的长度。
+
+Element Length是为没有设置VIRTQ_DESC_F_WRITE标志的已用描述符保留的，并且是被驱动忽略的。
+
+### 2.7.5 散列支持(Scatter-Gather Support)
+
+有些驱动需要一个东西来为请求提供一个包含多个缓冲区元素的列表（也称为SGL,散列表）。有两个特性支持这一点：描述符链和间接描述符。
+
+如果两个特性都没有被驱动使用，那么每个缓冲区在物理上是连续的，是只读的还是只写的完全由一个描述符描述。
+
+虽然不常见（大多数实现要么使用非间接描述符创建所有列表，要么始终使用单个间接元素）。但如果两个特性都已被设置，只要每个列表只包含给定类型的描述符，则在环中混合间接和非间接描述符是有效的。
+
+散列表只能应用于可用描述符。单个的已用描述符对应整个表。
+
+设备通过传输特定值和/或设备特定值限制表中描述符数量。如果不受限制，则列表中描述符的最大数量是virtqueue大小。
+
+
+### 2.7.6 下一个Flag: 描述链
+
+Packed ring格式允许驱动使用多个描述符向设备提供散列表。 并为除最后一个可用描述符外的所有描述符设置VIRTQ_DESC_F_NEXT在标志中。
+
+```
+/* This marks a buffer as continuing. */
+#define VIRTQ_DESC_F_NEXT 1
+```
+
+Buffer ID包含在表中的最后一个描述符中。
+
+驱动总是在表的其余部分被写入环之后将表中的第一个描述符设置可用。这保证了设备永远不会看到环中的散列表。（翻译注：这样设备应该只能看到第一个描述符）
+
+注：所有的标志位，包括VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VIRTQ_DESC_F_WRITE必须被设置/清除在链中的每一个描述符，不只是第一个。
+
+设备只写出一个已用描述符来表示整个描述链，然后根据表中描述符的数量向前跳。驱动需要跟踪对应于每个buffer ID的表大小，以便能够跳到设备写入下一个使用的描述符的位置。
+
+举个例子，如果描述符的使用顺序与它们可用的顺序相同，这将导致已用描述符覆盖列表中的第一个可用描述符，下一个列表的已用描述符覆盖下一个列表中的第一个可用描述符，etc。
+
+VIRTQ_DESC_F_NEXT保留再已用描述符中，并且是被驱动忽略的。
+
+### 2.7.7 间接标识位：散列表
+
+一些设备通过并发地发送大量的大请求而受益。VIRTIO_F_INDIRECT_DESC功能位允许这一点。为了增加环的容量，驱动可以存一个内存中的间接描述符表(table of indirect descriptors)，并插入一个描述符在主virtqueue(flags&VIRTQ_DESC_F_INDIRECT要为true)，这样内存就可以包含非直接描述表。addr和lenrefer对应间接描述符表中的地址和长度。
+
+```
+/* This means the element contains a table of descriptors. */
+#define VIRTQ_DESC_F_INDIRECT 4
+
+```
+
+
+间接描述符表内存分布如下(len为指向的描述符的长度，是一个变量）：
+
+```
+struct pvirtq_indirect_descriptor_table {
+	/* The actual descriptor structures (struct pvirtq_desc each) */
+	struct pvirtq_desc desc[len / sizeof(struct pvirtq_desc)];
+};
+```
+
+第一个描述符位于间接描述符表的开头，其他间接描述符紧随其后。VIRTQ_DESC_F_WRITE flags位是间接表中描述符的唯一有效标志。其他的则被保留，并被设备忽略。buffer ID也被保留，并被设备忽略。
+
+在具有VIRTQ_DESC_F_INDIRECT设置的描述符中，VIRTQ_DESC_F_WRITE被保留，并被设备忽略。
+
+### 2.7.8 顺序使用描述符
+
+有些设备总是按照它们可用的顺序使用描述符。这些设备可以提供VIRTIO_F_IN_ORDER功能位。如果设置了这个功能位，它会允许设备仅通过写出一个已用的描述符（其buffer ID与批中的最后一个描述符对应）来通知驱动使用一批缓冲区。
+
+然后根据表中描述符的数量向前跳。驱动需要跟踪对应于每个buffer ID的表大小，以便能够跳到设备写入下一个使用的描述符的位置。
+
+这将导致已用描述符覆盖批中的第一个可用描述符，下一批的已用描述符覆盖下一批中的第一个可用描述符，等等。
+
+### 2.7.9 多buffer请求
+
+有些设备将多个缓冲区组合起来作为处理单个请求的一部分。
+
