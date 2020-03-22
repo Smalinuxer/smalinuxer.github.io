@@ -719,3 +719,302 @@ struct pvirtq_indirect_descriptor_table {
 
 有些设备将多个缓冲区组合起来作为处理单个请求的一部分。
 
+
+### 2.7.10 驱动和设备禁止事件
+
+在很多使用used and available buffer notifications都会有大量开销。为了减少这种开销，每个virtqueue包含两个相同的结构，用于控制设备和驱动之间的通知。
+
+驱动禁止事件通知的数据结构是对于设备只读的，并且控制设备发送给驱动的已用缓冲区通知。
+
+设备禁止事件通知的数据结构是对于驱动只读的，并且控制驱动发送给设备的可用缓冲区通知。
+
+Event Suppression结构如下：
+
+1. 描述环事件改变flags:
+
+```
+/* Enable events */
+#define RING_EVENT_FLAGS_ENABLE 0x0
+/* Disable events */
+#define RING_EVENT_FLAGS_DISABLE 0x1
+/*
+ * Enable events for a specific descriptor
+ * (as specified by Descriptor Ring Change Event Offset/Wrap Counter).
+ * Only valid if VIRTIO_F_RING_EVENT_IDX has been negotiated.
+ */
+#define RING_EVENT_FLAGS_DESC 0x2
+/* The value 0x3 is reserved */
+```
+
+2. 描述环事件改变offset:当事件flags设置位描述符特定事件，环内的偏移量（以描述符大小为单位）。事件将仅在分别可用/已用此描述符时触发。
+3. 描述环事件改变counter:当事件flags设置位描述符特定事件，环内的偏移量（以描述符大小为单位）。事件仅在计数器与此值匹配且描述符分别可用/已用时触发。
+
+在写出一些描述符之后，设备和驱动都需要参考相关的结构，以确定是否应该分别使用一个available buffer notification。
+
+### 2.7.10.1 数据结构大小与内存对齐
+
+virtqueue的每个部分在guest的内存中物理上是连续的，并且具有不同的对齐要求。
+
+字节上的内存对齐和大小要求，virtqueue的每个部分的摘要如下表所示：
+
+Virtqueue Part	 Alignment 	Size
+Descriptor Ring 	16 		16∗(Queue Size)
+Device Event Suppression 4 4
+Driver Event Suppression 4 4
+
+- Alignment列给出virtqueue的每个部分的最小对齐方式。
+- Size列给出virtqueue每个部分的总字节数
+- 队列大小对应于virtqueue中的最大描述符数,队列大小值不必是2的幂。
+
+### 2.7.11 驱动要求：Virtqueues
+
+驱动必须确保每个virtqueue部分的第一个字节的物理地址，为上表中指定对齐值的倍数。
+
+### 2.7.12 设备要求：Virtqueues
+
+设备必须按照描述符在环中出现的顺序开始处理它们。设备必须开始按完成顺序将描述符写入环中。一旦描述符写入启动，设备可能会重新排序。
+
+### 2.7.13 Virtqueue描述符格式
+
+可用描述符指的是驱动发送到设备的buffer。adder是物理地址，描述符用id字段来辨别buffer。
+
+```
+struct pvirtq_desc {
+	/* Buffer Address. */
+	le64 addr;
+	/* Buffer Length. */
+	le32 len;
+	/* Buffer ID. */
+	le16 id;
+	/* The flags depending on descriptor type. */
+	le16 flags;
+};
+
+```
+
+描述符环是zero-initialized。
+
+### 2.7.14 禁止通知数据结构格式
+
+以下结构用于减少驱动和设备之间发送的通知数。
+
+```
+struct pvirtq_event_suppress {
+	le16 {
+		desc_event_off : 15; /* Descriptor Ring Change Event Offset */
+		desc_event_wrap : 1; /* Descriptor Ring Change Event Wrap Counter */
+	} desc; /* If desc_event_flags set to RING_EVENT_FLAGS_DESC */
+	le16 {
+		desc_event_flags : 2, /* Descriptor Ring Change Event Flags */
+		reserved : 14; /* Reserved, set to 0 */
+	} flags;
+}
+```
+
+### 2.7.15 设备要求：Virtqueue描述表
+
+设备不得写device-readable buffer，设备不应该读device-writable buffer。设备不能使用描述符，除非它观察到描述符标志中的VIRTQ_DESC_F_AVAIL位被更改。设备在更改其标志中的VIRTQ_DESC_F_USED后，不能再对它操作。
+
+### 2.7.16 驱动要求：Virtqueue描述表
+
+驱动不能更改描述符，除非它观察到描述符标志中的VIRTQ_DESC_F_USED位被更改。驱动在更改其标志中的VIRTQ_DESC_F_AVAIL位后，不能再对它操作。当通知设备时，驱动必须设置next_off和next_wrap以匹配下一个尚未提供给设备的描述符。驱动可以发送多个 available buffer notifications，而不向设备提供任何新的描述符。
+
+### 2.7.17 驱动要求：散列表
+
+- 驱动创建的描述符列表不能超过设备允许的长度。
+- 驱动创建的描述符列表不能超过队列大小。
+- 这意味着描述符列表中的循环是被禁止的！
+- 驱动必须要先放置device-readable的描述符，后面再放置device-writable描述符
+- 驱动不能依赖于设备使用更多的描述符来写出列表中的所有描述符。驱动必须确保环中有足够的空间容纳整个列表，然后才能使列表中的第一个描述符对设备可用。
+- 在构成列表的所有后续描述符可用之前，驱动不得使列表中的第一个描述符可用。
+
+### 2.7.18 设备要求：散列表
+
+- 设备必须按VIRTQ_DESC_F_NEXT标识顺序来使用描述符，顺序与驱动提供的顺序相同。
+- 设备可能会限制它在列表中允许的buffer数量。
+
+### 2.7.19 驱动要求：间接描述符
+
+- 除非已协商VIRTIO F_INDIRECT，否则驱动不得设置VIRTIO_F_INDIRECT_DESC标记。驱动不能在间接描述符中设置任何描述符除了 DESC_F_WRITE。
+- 驱动创建的描述符链不能超过设备允许的长度。
+- 驱动不能写在散列表中的有VIRTQ_DESC_F_NEXT的直接描述符，当DESC_F_INDIRECT被设置。
+
+### 2.7.20 Virtqueue操作
+
+virtqueue操作分为两部分：向设备提供新的可用buffer和处理设备中已用buffer。
+
+下面是在更详细地使用Packet virtqueue格式时这两个部分的要求。
+
+### 2.7.21 提供buffer到设备
+
+驱动向设备的virtqueues提供buffer，如下步骤：
+
+1. 驱动将buffer放入描述符环中的空闲描述符中。
+2. 驱动准备memory barrier，以确保在检查禁止通知之前更新描述符。
+3. 如果通知没被禁止，驱动通知设备新的可用buffer。
+
+以下是每个阶段的详细要求。
+
+### 2.7.21.1 将可用buffer放入描述符环
+
+对于每个Buffer,b:
+
+1. 获取描述表中的下一个描述符,d
+2. 获取下一个可用缓冲区id
+3. 设置d.addr为b的物理地址开头
+4. 设置d.len为b的len
+5. 设置d.id为buffer id
+6. 计算flags：
+	1. 如果b是device-writable的，设置VIRTQ_DESC_F_WRITE为1，否则0
+	2. 设置VIRTQ_DESC_F_AVAIL为当前的Driver Ring计数器。
+	3. 设置VIRTQ_DESC_F_USED在保留位中
+7. 执行memory barrier以确保描述符已初始化
+8. 设置d.flags去被计算的flags中。
+9. 如果d是最后一个描述符在描述环中，拨动Driver Ring计数器
+10. 否则，递增d以指向下一个描述符
+
+这使得单个描述符buffer可用。但是，一般来说，驱动可以使用一批描述符作为单个请求的一部分。在这种情况下，它会延迟更新第一个描述符的flags，直到其他描述符初始化之后。
+
+一旦驱动更新了描述符flags字段，就会公开描述符及其内容。设备可以访问描述符和驱动创建的任何以下描述符以及它们所引用的内存。
+
+### 2.7.21.1.1 驱动要求：更新flags
+
+在标记更新之前，驱动程序必须准备memory barrier，以确保设备看到最新的副本。
+
+### 2.7.21.2 发送Available Buffer Notifications
+
+设备通知的实际方法是bus-specific，但通常会很昂贵。因此，如果设备不需要这些通知，它可能会禁止这些通知。使用禁止通知结构，包括设备区域在2.7.14中。
+
+### 2.7.14.3 实现例子
+
+下面这是驱动代码例子，它不会尝试减少available buffer notifications的数量，它也不支持VIRTIO_F_RING_EVENT_IDX功能。
+```
+/* Note: vq->avail_wrap_count is initialized to 1 */
+/* Note: vq->sgs is an array same size as the ring */
+id = alloc_id(vq);
+
+first = vq->next_avail;
+sgs = 0;
+for (each buffer element b) {
+	sgs++;
+
+	vq->ids[vq->next_avail] = -1;
+	vq->desc[vq->next_avail].address = get_addr(b);
+	vq->desc[vq->next_avail].len = get_len(b);
+
+	avail = vq->avail_wrap_count ? VIRTQ_DESC_F_AVAIL : 0;
+	used = !vq->avail_wrap_count ? VIRTQ_DESC_F_USED : 0;
+	f = get_flags(b) | avail | used;
+	if (b is not the last buffer element) {
+		f |= VIRTQ_DESC_F_NEXT;
+	}
+
+	/* Don't mark the 1st descriptor available until all of them are ready. */
+	if (vq->next_avail == first) {
+		flags = f;
+	} else {
+		vq->desc[vq->next_avail].flags = f;
+	}
+
+	last = vq->next_avail;
+	vq->next_avail++;
+	if (vq->next_avail >= vq->size) {
+		vq->next_avail = 0;
+		vq->avail_wrap_count \^= 1;
+	}
+}
+
+vq->sgs[id] = sgs;
+/* ID included in the last descriptor in the list */
+vq->desc[last].id = id;
+write_memory_barrier();
+vq->desc[first].flags = flags;
+memory_barrier();
+
+if (vq->device_event.flags != RING_EVENT_FLAGS_DISABLE) {
+	notify_device(vq);
+}
+
+```
+
+### 2.7.21.3.1 驱动要求：发送Available Buffer Notifications
+
+在读取占据设备区域的事件抑制结构之前，驱动程序必须准备memory barrier。否则，可能导致无法发送available buffer notifications。
+
+### 2.7.22 从设备接收已用buffer
+
+一旦设备有已用buffer指向描述符（根据virtqueue和设备的性质，可以向它们读或写，或读写），它向驱动发送used buffer notification，详见第2.7.14节。
+
+注：为了获得最佳性能，驱动在处理已用buffer时可能会禁用used buffer notification,但请注意清空环和重新启用used buffer notification之间缺少通知的问题。这通常通过在重新启用通知后重新检查更多已用缓冲区来处理（翻译注：应该是每次清空的时候重启下就行）：
+
+
+```
+/* Note: vq->used_wrap_count is initialized to 1 */
+vq->driver_event.flags = RING_EVENT_FLAGS_DISABLE;
+
+for (;;) {
+	struct pvirtq_desc *d = vq->desc[vq->next_used];
+	/*
+	 * Check that
+	 * 1. Descriptor has been made available. This check is necessary
+	 * if the driver is making new descriptors available in parallel
+	 * with this processing of used descriptors (e.g. from another thread).
+	 * Note: there are many other ways to check this, e.g.
+	 * track the number of outstanding available descriptors or buffers
+	 * and check that it's not 0.
+	 * 2. Descriptor has been used by the device.
+	 */
+	flags = d->flags;
+	bool avail = flags & VIRTQ_DESC_F_AVAIL;
+	bool used = flags & VIRTQ_DESC_F_USED;
+	if (avail != vq->used_wrap_count || used != vq->used_wrap_count) {
+		vq->driver_event.flags = RING_EVENT_FLAGS_ENABLE;
+		memory_barrier();
+		/*
+		 * Re-test in case the driver made more descriptors available in
+		 * parallel with the used descriptor processing (e.g. from another
+		 * thread) and/or the device used more descriptors before the driver
+		 * enabled events.
+		 */
+		flags = d->flags;
+		bool avail = flags & VIRTQ_DESC_F_AVAIL;
+		bool used = flags & VIRTQ_DESC_F_USED;
+		if (avail != vq->used_wrap_count || used != vq->used_wrap_count) {
+			break;
+		}
+
+		vq->driver_event.flags = RING_EVENT_FLAGS_DISABLE;
+	}
+
+	read_memory_barrier();
+	/* skip descriptors until the next buffer */
+	id = d->id;
+	assert(id < vq->size);
+	sgs = vq->sgs[id];
+	vq->next_used += sgs;
+	if (vq->next_used >= vq->size) {
+		vq->next_used -= vq->size;
+		vq->used_wrap_count \^= 1;
+	}
+
+	free_id(vq, id);
+	process_buffer(d);
+}
+``` 
+
+### 2.7.23 驱动通知
+
+有时需要驱动向设备发送available buffer notification。
+
+当未协商VIRTIO_F_NOTIFICATION_DATA时，此通知涉及将virtqueue数目发送到设备（方法取决于传输）。
+
+为了帮助进行这些优化，在协商VIRTIO F_NOTIFICATION_DATA时，设备的驱动通知包括以下信息：
+
+vqn ： 需要被通知的VQ号
+next_off： 将写入下一个可用环条目的环内的偏移量。当VIRTIO_F_RING_PACKED未被协商，这个值指可用索引的15个最低有效位。当When VIRTIO_F_RING_PACKED被协商，这个值指得是offset（以描述符项为单位）在将写入下一个可用描述符的描述符环中。
+next_wrap：Wrap计数器，当VIRTIO_F_RING_PACKED被协商，这个warp计数器指向了下一个可用描述符，当VIRTIO_F_RING_PACKED未被协商，这个值是可用索引的最高有效位（15位）。
+
+注：驱动可以发送多个通知，即使不再提供任何可用的缓冲区。当VIRTIO_F_NOTIFICATION_DATA被协商，这些通知将具有相同的next-off和next-wrap值。
+
+
+1-2章完

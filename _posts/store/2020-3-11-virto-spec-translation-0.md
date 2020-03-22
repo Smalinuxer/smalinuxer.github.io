@@ -33,11 +33,11 @@ virtio这个东西，本人其实并不是非常熟悉，项目需要，开始�
     - [x] 2.4 设备配置空间(Device Configuration Space)
     - [x] 2.5 Virtqueues
     - [x] 2.6 Split Virtqueues
-    - [ ] 2.7 Packed Virtqueues
-- [ ] 第三章：General Initialization And Device Operation
-    - [ ] 3.1 Device Initialization
-    - [ ] 3.2 Device Operation
-    - [ ] 3.3 Device Cleanup
+    - [x] 2.7 Packed Virtqueues
+- [x] 第三章：初始化和设备操作(General Initialization And Device Operation)
+    - [ ] 3.1 设备初始化(Device Initialization)
+    - [ ] 3.2 设备操作(Device Operation)
+    - [ ] 3.3 设备清空(Device Cleanup)
 - [ ] 第四章：Virtio Transport Options
     - [ ] 4.1 Virtio Over PCI Bus
     - [ ] 4.2 Virtio Over MMIO
