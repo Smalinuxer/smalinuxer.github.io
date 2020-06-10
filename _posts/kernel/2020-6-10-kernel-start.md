@@ -205,7 +205,7 @@ $ chmod a+x init
 ```
 
 具体内容如下
-```shell script
+```shell
 #!/bin/busybox sh         
 mount -t proc none /proc  
 mount -t sysfs none /sys  
